@@ -60,7 +60,6 @@ with st.sidebar:
     st.markdown("---")
     st.header("⚙️ 系统设置")
     
-    # 风险阈值设置
     low_threshold = st.slider("低风险阈值", 0.0, 0.5, 0.3, 0.05)
     high_threshold = st.slider("高风险阈值", 0.5, 1.0, 0.7, 0.05)
     
@@ -128,15 +127,25 @@ if uploaded_file is not None:
     st.subheader("🤖 智能风险评估")
     
     with st.spinner("🔄 正在训练风险模型，请稍候..."):
-        # 准备特征
+        # 准备特征 - 自动过滤非数值列
         exclude_cols = ['label', 'high_invoice_reuse', 'multi_bank', 'frequent_drawdown']
-        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        
+        # 只选择数值类型的列
+        numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
+        feature_cols = [col for col in numeric_cols if col not in exclude_cols]
+        
+        # 如果特征列为空，报错提示
+        if len(feature_cols) == 0:
+            st.error("❌ 未找到可用于训练的数值特征列，请检查数据格式")
+            st.stop()
+        
         X = df[feature_cols]
         
         # 处理标签
         if 'label' in df.columns:
             y = df['label']
         else:
+            # 用营收贷款比和银行数模拟风险标签
             risk_score = df['revenue_loan_ratio'] / 5 + df['bank_count'] / 10
             y = (risk_score > risk_score.median()).astype(int)
         
@@ -199,7 +208,6 @@ if uploaded_file is not None:
             st.plotly_chart(fig, use_container_width=True)
         
         with col2:
-            # 风险等级饼图
             pie_data = df['risk_level'].value_counts().reset_index()
             pie_data.columns = ['风险等级', '数量']
             fig_pie = px.pie(
@@ -239,7 +247,6 @@ if uploaded_file is not None:
     with tab3:
         st.subheader("🔍 单企业风险详情查询")
         
-        # 企业选择
         if 'id' in df.columns:
             id_list = df['id'].tolist()
         else:
@@ -282,7 +289,6 @@ if uploaded_file is not None:
                 st.plotly_chart(fig3, use_container_width=True)
             
             with col2:
-                # 银行集中度分析
                 bank_counts = df['bank_count'].value_counts().sort_index()
                 st.write("**银行关联度统计：**")
                 st.dataframe(pd.DataFrame({
@@ -291,7 +297,6 @@ if uploaded_file is not None:
                     '占比': (bank_counts.values / len(df) * 100).round(2)
                 }), use_container_width=True)
             
-            # 网络图
             st.markdown("**企业-银行关联网络图（前30条）**")
             sample_df = df.head(30).copy()
             bank_names = ['工商银行', '建设银行', '农业银行', '中国银行', '交通银行', '招商银行', '浦发银行', '中信银行']
@@ -406,7 +411,7 @@ else:
     
     ### 📌 数据格式要求
     - 文件格式：CSV
-    - 必须包含字段：`revenue_loan_ratio`、`bank_count`、`industry_risk`
+    - 必须包含数值类型的特征列
     - 可选字段：`label`（风险标签，用于模型训练）
     """)
 
