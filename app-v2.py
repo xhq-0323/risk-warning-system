@@ -1,6 +1,6 @@
 """
 V2 全功能升级版 - 跨行重复融资风险预警系统
-面向银行风控场景的专业化设计
+基于预训练逻辑回归模型 (risk_model.pkl)
 """
 
 import streamlit as st
@@ -10,7 +10,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import networkx as nx
 import random
-from sklearn.ensemble import RandomForestClassifier
+import joblib  # 导入 joblib 用于加载模型
 from datetime import datetime
 
 # ========== 页面配置 ==========
@@ -21,7 +21,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ========== CSS 自定义样式（银行风控风格） ==========
+# ========== CSS 自定义样式 ==========
 st.markdown("""
 <style>
     .risk-high { color: #dc3545; font-weight: bold; }
@@ -34,21 +34,23 @@ st.markdown("""
         text-align: center;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
-    .metric-value {
-        font-size: 28px;
-        font-weight: bold;
-        color: #1f77b4;
-    }
-    .metric-label {
-        font-size: 14px;
-        color: #6c757d;
-    }
+    .metric-value { font-size: 28px; font-weight: bold; color: #1f77b4; }
+    .metric-label { font-size: 14px; color: #6c757d; }
 </style>
 """, unsafe_allow_html=True)
 
+# ========== 加载预训练模型（缓存加速） ==========
+@st.cache_resource
+def load_model():
+    try:
+        return joblib.load('risk_model.pkl')
+    except Exception as e:
+        st.error(f"❌ 模型加载失败: {e}")
+        return None
+
 # ========== 标题与导航 ==========
 st.title("🏛️ 跨行重复融资风险预警系统 V2")
-st.caption(f"⏱️ 系统运行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 适用于银行票据业务风控场景")
+st.caption(f"⏱️ 系统运行时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 基于逻辑回归预训练模型")
 
 st.markdown("---")
 
@@ -67,21 +69,26 @@ with st.sidebar:
     st.header("📌 使用说明")
     st.info("""
     1. 上传 CSV 格式的融资数据
-    2. 系统自动训练模型并预测风险
+    2. 系统自动加载预训练模型进行预测
     3. 查看多维度风险分析面板
     4. 一键导出高风险企业名单
     """)
 
 # ========== 主功能区 ==========
 if uploaded_file is not None:
-    # ---------- 加载数据 ----------
+    # ---------- 1. 加载模型 ----------
+    model = load_model()
+    if model is None:
+        st.stop()
+    
+    # ---------- 2. 加载数据 ----------
     @st.cache_data
     def load_data(file):
         return pd.read_csv(file)
     
     df = load_data(uploaded_file)
     
-    # ---------- 数据概览 ----------
+    # ---------- 3. 数据概览 ----------
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f"""
@@ -118,47 +125,38 @@ if uploaded_file is not None:
     
     st.markdown("---")
     
-    # ---------- 数据预览 ----------
+    # ---------- 4. 数据预览 ----------
     with st.expander("📊 原始数据预览", expanded=False):
         st.dataframe(df.head(20), use_container_width=True)
         st.caption(f"共 {len(df)} 行，{df.shape[1]} 列")
     
-    # ---------- 模型训练与预测 ----------
+    # ---------- 5. 模型预测（核心修改点） ----------
     st.subheader("🤖 智能风险评估")
     
-    with st.spinner("🔄 正在训练风险模型，请稍候..."):
-        # 准备特征 - 自动过滤非数值列
-        exclude_cols = ['label', 'high_invoice_reuse', 'multi_bank', 'frequent_drawdown']
+    with st.spinner("🔄 正在加载模型并进行预测，请稍候..."):
+        # 模型训练时使用的10个特征（必须完全匹配）
+        model_features = [
+            'invoice_reuse', 'bank_count', 'drawdown_30d', 
+            'revenue_loan_ratio', 'industry_risk', 'punished_before',
+            'registered_capital', 'high_invoice_reuse', 'multi_bank', 
+            'frequent_drawdown'
+        ]
         
-        # 只选择数值类型的列
-        numeric_cols = df.select_dtypes(include=['int64', 'float64']).columns.tolist()
-        feature_cols = [col for col in numeric_cols if col not in exclude_cols]
-        
-        # 如果特征列为空，报错提示
-        if len(feature_cols) == 0:
-            st.error("❌ 未找到可用于训练的数值特征列，请检查数据格式")
+        # 检查数据中是否包含所有必需的特征
+        missing_cols = [col for col in model_features if col not in df.columns]
+        if missing_cols:
+            st.error(f"❌ 数据缺少必需的列: {missing_cols}")
             st.stop()
         
-        X = df[feature_cols]
+        # 提取特征
+        X = df[model_features]
         
-        # 处理标签
-        if 'label' in df.columns:
-            y = df['label']
-        else:
-            # 用营收贷款比和银行数模拟风险标签
-            risk_score = df['revenue_loan_ratio'] / 5 + df['bank_count'] / 10
-            y = (risk_score > risk_score.median()).astype(int)
-        
-        # 训练模型
-        model = RandomForestClassifier(n_estimators=50, random_state=42)
-        model.fit(X, y)
-        prob = model.predict_proba(X)[:, 1]
-        
-        # 特征重要性
-        importance = pd.DataFrame({
-            'feature': feature_cols,
-            'importance': model.feature_importances_
-        }).sort_values('importance', ascending=False)
+        # 使用预训练模型进行预测（注意：这里不再需要 .fit()）
+        try:
+            prob = model.predict_proba(X)[:, 1]
+        except Exception as e:
+            st.error(f"❌ 预测失败: {e}")
+            st.stop()
     
     # 风险等级划分
     df['risk_prob'] = prob
@@ -168,7 +166,7 @@ if uploaded_file is not None:
         labels=['低风险', '中风险', '高风险']
     )
     
-    # ---------- 风险概览仪表板 ----------
+    # ---------- 6. 风险概览仪表板 ----------
     col1, col2, col3 = st.columns(3)
     risk_counts = df['risk_level'].value_counts()
     
@@ -187,7 +185,7 @@ if uploaded_file is not None:
     
     st.markdown("---")
     
-    # ---------- 风险分布可视化 ----------
+    # ---------- 7. 风险分布可视化 ----------
     st.subheader("📈 风险分布分析")
     
     tab1, tab2, tab3, tab4 = st.tabs(["风险概率分布", "行业风险分析", "企业详情查询", "关联网络分析"])
@@ -270,8 +268,8 @@ if uploaded_file is not None:
         
         st.write("**企业特征明细：**")
         st.dataframe(pd.DataFrame({
-            '特征': feature_cols,
-            '数值': [row[col] for col in feature_cols]
+            '特征': model_features,
+            '数值': [row[col] for col in model_features]
         }), use_container_width=True)
     
     with tab4:
@@ -358,18 +356,7 @@ if uploaded_file is not None:
         else:
             st.warning("数据中无 'bank_count' 字段")
     
-    # ---------- 特征重要性 ----------
-    st.subheader("📊 特征重要性分析")
-    fig_importance = px.bar(
-        importance.head(10), x='importance', y='feature',
-        orientation='h',
-        title="Top 10 风险特征",
-        color='importance',
-        color_continuous_scale='Blues'
-    )
-    st.plotly_chart(fig_importance, use_container_width=True)
-    
-    # ---------- 高风险名单导出 ----------
+    # ---------- 8. 高风险名单导出 ----------
     st.markdown("---")
     st.subheader("📋 高风险企业名单")
     
@@ -389,7 +376,7 @@ if uploaded_file is not None:
             )
     
     if len(high_risk_df) > 0:
-        st.dataframe(high_risk_df[feature_cols[:5] + ['risk_prob', 'risk_level']], use_container_width=True)
+        st.dataframe(high_risk_df[model_features[:5] + ['risk_prob', 'risk_level']], use_container_width=True)
     else:
         st.success("🎉 恭喜！当前数据中未发现高风险企业")
     
@@ -403,7 +390,7 @@ else:
     | 功能模块 | 说明 |
     | :--- | :--- |
     | **📊 数据概览** | 展示企业数量、平均关联银行数、营收贷款比等关键指标 |
-    | **🤖 智能预测** | 基于随机森林算法实时评估企业重复融资风险 |
+    | **🤖 智能预测** | 基于预训练逻辑回归模型，实时评估企业重复融资风险 |
     | **📈 风险分布** | 概率分布图、行业风险对比、等级占比饼图 |
     | **🔍 企业详情** | 查询任意企业的风险评分和特征明细 |
     | **🏦 关联网络** | 可视化展示企业与银行之间的融资关联关系 |
@@ -411,10 +398,9 @@ else:
     
     ### 📌 数据格式要求
     - 文件格式：CSV
-    - 必须包含数值类型的特征列
-    - 可选字段：`label`（风险标签，用于模型训练）
+    - 必须包含以下字段：`invoice_reuse`, `bank_count`, `drawdown_30d`, `revenue_loan_ratio`, `industry_risk`, `punished_before`, `registered_capital`, `high_invoice_reuse`, `multi_bank`, `frequent_drawdown`
     """)
 
 # ========== 页脚 ==========
 st.markdown("---")
-st.caption("🏛️ 跨行重复融资风险预警系统 V2 | 金融科技创新大赛 | 基于 Streamlit 构建")
+st.caption("🏛️ 跨行重复融资风险预警系统 V2 | 金融科技创新大赛 | 基于逻辑回归预训练模型")
